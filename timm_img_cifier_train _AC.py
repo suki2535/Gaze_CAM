@@ -283,7 +283,7 @@ pd.Series({
 #### Set training image size
 """
 
-train_sz = 288
+train_sz = 224
 
 """#### Initialize image transforms"""
 
@@ -297,7 +297,7 @@ resize_max = ResizeMax(max_sz=train_sz)
 pad_square = PadSquare(shift=True, fill=fill)
 
 # # Create a TrivialAugmentWide object
-trivial_aug = transforms.TrivialAugmentWide(fill=fill)
+#trivial_aug = transforms.TrivialAugmentWide(fill=fill)
 
 
 
@@ -309,27 +309,27 @@ print("Display image")
 #display(sample_img)
 
 # Augment the image
-augmented_img = trivial_aug(sample_img)
+#augmented_img = trivial_aug(sample_img)
 
 # Resize the image
-resized_img = resize_max(augmented_img)
+#resized_img = resize_max(augmented_img)
 
 # Pad the image
-padded_img = pad_square(resized_img)
+#padded_img = pad_square(resized_img)
 
 # Ensure the padded image is the target size
-resize = transforms.Resize([train_sz] * 2, antialias=True)
-resized_padded_img = resize(padded_img)
+#resize = transforms.Resize([train_sz] * 2, antialias=True)
+#resized_padded_img = resize(padded_img)
 
 # Display the annotated image
 #display(resized_padded_img)
 
-pd.Series({
+'''pd.Series({
     "Source Image:": sample_img.size,
     "Resized Image:": resized_img.size,
     "Padded Image:": padded_img.size,
     "Resized Padded Image:": resized_padded_img.size,
-}).to_frame().style.hide(axis='columns')
+}).to_frame().style.hide(axis='columns')'''
 
 
 
@@ -348,7 +348,7 @@ class ImageDataset(Dataset):
         transforms (callable, optional): Transformations to be applied to the images.
     """
 
-    def __init__(self, img_paths, class_to_idx, transforms=None):
+    def __init__(self, img_paths, class_to_idx, transforms=None, gaze_transforms = None):
         """
         Initializes the ImageDataset with image keys and other relevant information.
 
@@ -362,6 +362,7 @@ class ImageDataset(Dataset):
         self._img_paths = img_paths
         self._class_to_idx = class_to_idx
         self._transforms = transforms
+        self._gaze_tfm = gaze_transforms
 
     def __len__(self):
         """
@@ -388,11 +389,11 @@ class ImageDataset(Dataset):
         # Applying transformations if specified
         if self._transforms:
             image = self._transforms(image)
-            g_image = self._transforms(g_image)
-        grayscale_transform = transforms.Grayscale(num_output_channels=1)
-        grayscale_image = grayscale_transform(g_image)
-        g_image = grayscale_image / 255
+        if self._gaze_tfm:
+            g_image = self._gaze_tfm(g_image)
         return image,g_image, label
+
+
 
     def _load_gaze(self, label,img_path):
         dicomid=(os.path.basename(img_path).split('.')[0])
@@ -439,10 +440,13 @@ train_tfms = transforms.Compose([
     resize_pad_tfm,
     final_tfms
 ])
-
+grayscale_transform = transforms.Grayscale(num_output_channels=1)
 valid_tfms = transforms.Compose([resize_pad_tfm, final_tfms])
 gaze_tfms  = transforms.Compose([
-    resize_pad_tfm
+    resize_pad_tfm,
+    transforms.ToImage(),
+    grayscale_transform,
+    transforms.ToDtype(torch.float32, scale=True),
 ])
 
 
@@ -452,8 +456,8 @@ gaze_tfms  = transforms.Compose([
 class_to_idx = {c: i for i, c in enumerate(class_names)}
 print(class_to_idx)
 # Instantiate the dataset using the defined transformations
-train_dataset = ImageDataset(train_paths, class_to_idx, train_tfms)
-valid_dataset = ImageDataset(val_paths, class_to_idx, valid_tfms)
+train_dataset = ImageDataset(train_paths, class_to_idx, train_tfms, gaze_tfms)
+valid_dataset = ImageDataset(val_paths, class_to_idx, valid_tfms, gaze_tfms)
 
 # Print the number of samples in the training and validation datasets
 pd.Series({
@@ -547,8 +551,9 @@ def run_epoch(model, dataloader, optimizer, metric, lr_scheduler, device, scaler
 #                outputs = model(inputs) # Forward pass
 #                loss = torch.nn.functional.cross_entropy(outputs, targets) # Compute loss
         #print(inputs.size())
-        model.train()
-        outputs = model(inputs)# Forward pass
+        if is_training:
+            model.train()
+            outputs = model(inputs)# Forward pass
         #print(outputs.size())
 
         batch_loss = torch.tensor(0.0)
@@ -556,7 +561,7 @@ def run_epoch(model, dataloader, optimizer, metric, lr_scheduler, device, scaler
         for i in range(n):
             # print(label[i],outputs[i])
             map = act[i].unsqueeze(0).unsqueeze(0)
-            resized_act = torch.nn.functional.interpolate(map, size=(288,288), mode='bicubic', align_corners=False)
+            resized_act = torch.nn.functional.interpolate(map, size=(224,224), mode='bicubic', align_corners=False)
             #(gaze[i].size())
             mask = resized_act.squeeze(0).squeeze(0).flatten()
             mask.requires_grad_()
@@ -570,6 +575,7 @@ def run_epoch(model, dataloader, optimizer, metric, lr_scheduler, device, scaler
         # mean_loss = torch.nn.functional.mse_loss(loss,  reduction="mean")
         loss1 = torch.nn.functional.cross_entropy(outputs, label)
         loss = loss1 + 0.5*loss0
+        #loss = loss0
         metric.update(outputs.detach().cpu(), label.detach().cpu())
         #If in training mode
         if is_training:
@@ -672,13 +678,13 @@ print(class_labels_path)
 """### Configure the Training Parameters"""
 
 # Learning rate for the model
-lr = 1e-3
+lr = 5e-5
 
 # Number of training epochs
-epochs = 5
+epochs = 10
 
 # AdamW optimizer; includes weight decay for regularization
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr, eps=1e-5)
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay = 0.001)
 
 # Learning rate scheduler; adjusts the learning rate during training
 lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
@@ -750,8 +756,8 @@ train()
 
 #Load the pretrained model
 #model.load_state_dict(torch.load('D:/cxraytimdata/resnet18d.ra2_in1k.pth', weights_only=True))
-model.load_state_dict(torch.load('D:/cxr_timm/resnet50d.ra2_ink1.pth', weights_only=True))
-model.eval()
+#model.load_state_dict(torch.load('D:/cxr_timm/resnet50d.ra2_ink1.pth', weights_only=True))
+#model.eval()
 
 #predictions
 #for i in  range (0,20):
